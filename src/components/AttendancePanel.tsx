@@ -49,7 +49,7 @@ export default function AttendancePanel({ onGoToPOS, onBack }: AttendancePanelPr
         const scanner = new QrScanner(
           videoRef.current,
           async (result) => {
-            const token = typeof result === 'string' ? result : result.data;
+            const token = (typeof result === 'string' ? result : result.data).trim();
             setQrToken(token);
             setError('');
             setScannerActive(false);
@@ -183,12 +183,18 @@ export default function AttendancePanel({ onGoToPOS, onBack }: AttendancePanelPr
         'Saving attendance timed out. Make sure the updated SQL setup was run in Supabase.',
       );
 
-      if (rpcError) throw rpcError;
+      if (rpcError) {
+        throw new Error(rpcError.message || formatUnknownError(rpcError));
+      }
 
-      const result = data as AttendanceResponse;
+      const result = normalizeAttendanceResponse(data);
+
+      if (!result) {
+        throw new Error(`Unexpected attendance response: ${formatUnknownError(data)}`);
+      }
 
       if (!result.success) {
-        throw new Error(result.message || 'Attendance submit failed.');
+        throw new Error(result.message || `Attendance rejected: ${formatUnknownError(result)}`);
       }
 
       setStatus(result);
@@ -218,8 +224,7 @@ export default function AttendancePanel({ onGoToPOS, onBack }: AttendancePanelPr
         }, 900);
       }
     } catch (submitError) {
-      const message =
-        submitError instanceof Error ? submitError.message : 'Attendance submit failed.';
+      const message = getErrorMessage(submitError);
       setError(message);
       setAutoSubmitted(false);
       setSelfieDataUrl('');
@@ -260,6 +265,41 @@ export default function AttendancePanel({ onGoToPOS, onBack }: AttendancePanelPr
         },
       );
     });
+  }
+
+  function normalizeAttendanceResponse(data: unknown): AttendanceResponse | null {
+    if (!data || typeof data !== 'object') {
+      return null;
+    }
+
+    if ('success' in data) {
+      return data as AttendanceResponse;
+    }
+
+    return null;
+  }
+
+  function getErrorMessage(errorValue: unknown) {
+    if (errorValue instanceof Error && errorValue.message) {
+      return errorValue.message;
+    }
+
+    if (errorValue && typeof errorValue === 'object' && 'message' in errorValue) {
+      const message = (errorValue as { message?: unknown }).message;
+      if (typeof message === 'string' && message) {
+        return message;
+      }
+    }
+
+    return `Attendance submit failed: ${formatUnknownError(errorValue)}`;
+  }
+
+  function formatUnknownError(value: unknown) {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
   }
 
   const selfieEnabled = Boolean(eventType && qrToken && coords && !busy && !status);
