@@ -5,7 +5,7 @@ import POSPanel from './components/POSPanel';
 import logo from './assets/logo.png';
 import { supabase } from './lib/supabase';
 
-type Tab = 'attendance' | 'dashboard' | 'pos';
+type Tab = 'home' | 'attendance' | 'owner-login' | 'dashboard' | 'pos';
 
 type StaffIdentity = {
   employeeId?: string;
@@ -32,16 +32,24 @@ function readLastStaff(): StaffIdentity | null {
   }
 }
 
+const inputStyle: React.CSSProperties = {
+  padding: '12px 14px',
+  borderRadius: '8px',
+  border: '1px solid #d7c9b6',
+  minWidth: '220px',
+  width: '100%',
+};
+
 export default function App() {
-  const [tab, setTab] = useState<Tab>('attendance');
+  const [tab, setTab] = useState<Tab>('home');
   const [staffIdentity, setStaffIdentity] = useState<StaffIdentity | null>(() => readLastStaff());
   const [ownerProfile, setOwnerProfile] = useState<ProfileRow | null>(null);
   const [ownerLoading, setOwnerLoading] = useState(true);
-  const [ownerLoginOpen, setOwnerLoginOpen] = useState(false);
   const [ownerEmail, setOwnerEmail] = useState('');
   const [ownerPassword, setOwnerPassword] = useState('');
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState('');
+  const [authMessage, setAuthMessage] = useState('');
 
   useEffect(() => {
     const syncStaff = () => {
@@ -51,7 +59,7 @@ export default function App() {
       if (currentStaff?.qrToken) {
         setTab('pos');
       } else if (!ownerProfile) {
-        setTab('attendance');
+        setTab('home');
       }
     };
 
@@ -98,7 +106,6 @@ export default function App() {
       }
 
       setOwnerProfile(profile as ProfileRow);
-      setOwnerLoginOpen(false);
       setTab('dashboard');
       setOwnerLoading(false);
     }
@@ -124,8 +131,8 @@ export default function App() {
   }, [ownerProfile, staffIdentity?.qrToken]);
 
   useEffect(() => {
-    if (activeRole === 'none' && tab !== 'attendance') {
-      setTab('attendance');
+    if (activeRole === 'none' && (tab === 'dashboard' || tab === 'pos')) {
+      setTab('home');
     }
 
     if (activeRole === 'staff' && tab === 'dashboard') {
@@ -137,6 +144,7 @@ export default function App() {
     try {
       setAuthBusy(true);
       setAuthError('');
+      setAuthMessage('');
 
       const { error } = await supabase.auth.signInWithPassword({
         email: ownerEmail,
@@ -153,15 +161,38 @@ export default function App() {
     }
   }
 
+  async function sendPasswordReset() {
+    try {
+      setAuthBusy(true);
+      setAuthError('');
+      setAuthMessage('');
+
+      if (!ownerEmail) {
+        throw new Error('Enter your owner email first.');
+      }
+
+      const { error } = await supabase.auth.resetPasswordForEmail(ownerEmail, {
+        redirectTo: window.location.origin,
+      });
+
+      if (error) throw error;
+
+      setAuthMessage('Password reset email sent. Check your inbox.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to send password reset.';
+      setAuthError(message);
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
   async function signOutOwner() {
     await supabase.auth.signOut();
     setOwnerProfile(null);
-    setTab(staffIdentity?.qrToken ? 'pos' : 'attendance');
+    setTab(staffIdentity?.qrToken ? 'pos' : 'home');
   }
 
-  const showAttendance = tab === 'attendance';
-  const showDashboard = activeRole === 'admin' && tab === 'dashboard';
-  const showPOS = activeRole !== 'none' && tab === 'pos';
+  const showHeaderNav = activeRole !== 'none';
 
   return (
     <div className="app-shell">
@@ -180,44 +211,44 @@ export default function App() {
               width: '64px',
               height: '64px',
               objectFit: 'contain',
-              borderRadius: '14px',
+              borderRadius: '8px',
               background: 'transparent',
               flexShrink: 0,
             }}
           />
 
           <div>
-            <div className="brand-title">Cup of Joy Staff App</div>
+            <div className="brand-title">Cup of Joy</div>
             <div className="muted">
               {activeRole === 'admin'
                 ? 'Owner dashboard'
                 : activeRole === 'staff'
                   ? `Active staff: ${staffIdentity?.employeeName || 'Staff'}`
-                  : 'Time in or time out to begin'}
+                  : 'Choose how you want to continue'}
             </div>
           </div>
         </div>
 
-        <div className="tab-row wrap">
-          <button
-            className={tab === 'attendance' ? 'tab-btn active' : 'tab-btn'}
-            onClick={() => setTab('attendance')}
-            type="button"
-          >
-            Attendance
-          </button>
-
-          {activeRole === 'admin' ? (
+        {showHeaderNav ? (
+          <div className="tab-row wrap">
             <button
-              className={tab === 'dashboard' ? 'tab-btn active' : 'tab-btn'}
-              onClick={() => setTab('dashboard')}
+              className={tab === 'attendance' ? 'tab-btn active' : 'tab-btn'}
+              onClick={() => setTab('attendance')}
               type="button"
             >
-              Dashboard
+              Staff Time In / Out
             </button>
-          ) : null}
 
-          {activeRole !== 'none' ? (
+            {activeRole === 'admin' ? (
+              <button
+                className={tab === 'dashboard' ? 'tab-btn active' : 'tab-btn'}
+                onClick={() => setTab('dashboard')}
+                type="button"
+              >
+                Dashboard
+              </button>
+            ) : null}
+
             <button
               className={tab === 'pos' ? 'tab-btn active' : 'tab-btn'}
               onClick={() => setTab('pos')}
@@ -225,77 +256,108 @@ export default function App() {
             >
               POS
             </button>
-          ) : null}
 
-          {ownerProfile ? (
-            <button className="ghost-btn" onClick={signOutOwner} type="button">
-              Sign Out Owner
-            </button>
-          ) : (
-            <button
-              className="ghost-btn"
-              onClick={() => {
-                setOwnerLoginOpen((open) => !open);
-                setAuthError('');
-              }}
-              type="button"
-            >
-              Owner Login
-            </button>
-          )}
-        </div>
+            {ownerProfile ? (
+              <button className="ghost-btn" onClick={signOutOwner} type="button">
+                Sign Out Owner
+              </button>
+            ) : null}
+          </div>
+        ) : null}
       </header>
 
-      {ownerLoginOpen && !ownerProfile ? (
-        <div className="panel" style={{ marginBottom: '18px' }}>
-          <div className="section-title">Owner Login</div>
-          <p className="muted">Owner access opens the admin dashboard.</p>
+      {ownerLoading ? <div className="info-box">Checking access...</div> : null}
 
-          <div className="action-row wrap">
+      {tab === 'home' ? (
+        <div className="grid-two">
+          <button
+            className="panel"
+            onClick={() => setTab('attendance')}
+            type="button"
+            style={{
+              textAlign: 'left',
+              minHeight: '220px',
+              cursor: 'pointer',
+            }}
+          >
+            <div className="section-title">Staff Login</div>
+            <p className="muted">Time in, time out, then continue to POS after a successful staff login.</p>
+            <div className="primary-btn" style={{ display: 'inline-block', marginTop: '18px' }}>
+              Continue as Staff
+            </div>
+          </button>
+
+          <button
+            className="panel"
+            onClick={() => {
+              setTab('owner-login');
+              setAuthError('');
+              setAuthMessage('');
+            }}
+            type="button"
+            style={{
+              textAlign: 'left',
+              minHeight: '220px',
+              cursor: 'pointer',
+            }}
+          >
+            <div className="section-title">Owner Login</div>
+            <p className="muted">Sign in with owner email and password to open the admin dashboard.</p>
+            <div className="secondary-btn" style={{ display: 'inline-block', marginTop: '18px' }}>
+              Continue as Owner
+            </div>
+          </button>
+        </div>
+      ) : null}
+
+      {tab === 'owner-login' ? (
+        <div className="panel" style={{ maxWidth: '560px', margin: '0 auto' }}>
+          <button className="ghost-btn" onClick={() => setTab('home')} type="button">
+            Back
+          </button>
+
+          <div className="section-title" style={{ marginTop: '16px' }}>
+            Owner Login
+          </div>
+          <p className="muted">Use your owner email and password.</p>
+
+          <div style={{ display: 'grid', gap: '12px', marginTop: '16px' }}>
             <input
               type="email"
               value={ownerEmail}
               onChange={(event) => setOwnerEmail(event.target.value)}
               placeholder="Owner email"
-              style={{
-                padding: '12px 14px',
-                borderRadius: '12px',
-                border: '1px solid #d7c9b6',
-                minWidth: '220px',
-              }}
+              style={inputStyle}
             />
             <input
               type="password"
               value={ownerPassword}
               onChange={(event) => setOwnerPassword(event.target.value)}
               placeholder="Password"
-              style={{
-                padding: '12px 14px',
-                borderRadius: '12px',
-                border: '1px solid #d7c9b6',
-                minWidth: '220px',
-              }}
+              style={inputStyle}
             />
-            <button className="secondary-btn" onClick={signInOwner} type="button" disabled={authBusy}>
+
+            <button className="primary-btn" onClick={signInOwner} type="button" disabled={authBusy}>
               {authBusy ? 'Signing In...' : 'Sign In'}
+            </button>
+
+            <button className="ghost-btn" onClick={sendPasswordReset} type="button" disabled={authBusy}>
+              Forgot password?
             </button>
           </div>
 
           {authError ? <div className="error-box">{authError}</div> : null}
+          {authMessage ? <div className="success-box">{authMessage}</div> : null}
         </div>
       ) : null}
 
-      {ownerLoading ? <div className="info-box">Checking access...</div> : null}
+      {tab === 'attendance' ? (
+        <AttendancePanel onGoToPOS={() => setTab('pos')} />
+      ) : null}
 
-      {showAttendance ? (
-        <AttendancePanel onGoToPOS={() => setTab('pos')} />
-      ) : showDashboard ? (
-        <DashboardPanel forcedMode="admin" />
-      ) : showPOS ? (
-        <POSPanel />
-      ) : (
-        <AttendancePanel onGoToPOS={() => setTab('pos')} />
-      )}
+      {activeRole === 'admin' && tab === 'dashboard' ? <DashboardPanel forcedMode="admin" /> : null}
+
+      {activeRole !== 'none' && tab === 'pos' ? <POSPanel /> : null}
     </div>
   );
 }
