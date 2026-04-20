@@ -792,6 +792,196 @@ begin
 end;
 $$;
 
+create or replace function public.list_open_attendance_sessions()
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  v_sessions jsonb;
+begin
+  select coalesce(
+    jsonb_agg(
+      jsonb_build_object(
+        'employeeId', open_sessions.employee_id,
+        'employeeNumber', open_sessions.employee_number,
+        'employeeName', open_sessions.employee_name,
+        'timeInAt', open_sessions.time_in_at
+      )
+      order by open_sessions.time_in_at desc
+    ),
+    '[]'::jsonb
+  )
+  into v_sessions
+  from (
+    select
+      time_in.employee_id,
+      employees.employee_number,
+      employees.full_name as employee_name,
+      time_in.scanned_at as time_in_at
+    from public.attendance_logs time_in
+    join public.employees employees on employees.id = time_in.employee_id
+    where employees.is_active = true
+      and time_in.event_type = 'time_in'
+      and not exists (
+        select 1
+        from public.attendance_logs time_out
+        where time_out.employee_id = time_in.employee_id
+          and time_out.event_type = 'time_out'
+          and time_out.scanned_at > time_in.scanned_at
+      )
+    order by time_in.scanned_at desc
+  ) open_sessions;
+
+  return jsonb_build_object('success', true, 'sessions', v_sessions);
+end;
+$$;
+
+create or replace function public.record_attendance_time_out_by_employee(
+  p_employee_id uuid,
+  p_latitude double precision,
+  p_longitude double precision,
+  p_accuracy double precision default null,
+  p_selfie_path text default null,
+  p_source_label text default 'web-kiosk'
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  v_employee public.employees;
+  v_location public.business_locations;
+  v_distance integer;
+  v_scanned_at timestamptz := now();
+  v_local_date date := (now() at time zone 'Asia/Manila')::date;
+  v_local_time time := (now() at time zone 'Asia/Manila')::time;
+  v_open_session record;
+  v_attendance public.attendance_logs;
+begin
+  if p_employee_id is null or p_selfie_path is null or p_selfie_path = '' then
+    return jsonb_build_object('success', false, 'message', 'Missing employee or selfie.');
+  end if;
+
+  select *
+  into v_employee
+  from public.employees
+  where id = p_employee_id
+    and is_active = true;
+
+  if not found then
+    return jsonb_build_object('success', false, 'message', 'Active employee not found.');
+  end if;
+
+  select loc.*
+  into v_location
+  from public.business_locations loc
+  where loc.is_active = true
+  order by public.distance_meters(p_latitude, p_longitude, loc.latitude, loc.longitude)
+  limit 1;
+
+  if not found then
+    return jsonb_build_object('success', false, 'message', 'No allowed business locations found.');
+  end if;
+
+  v_distance := public.distance_meters(p_latitude, p_longitude, v_location.latitude, v_location.longitude);
+
+  if v_distance > v_location.allowed_radius_m then
+    return jsonb_build_object(
+      'success', false,
+      'message', 'You are outside the allowed radius for ' || v_location.name || '. Move closer and try again.',
+      'employeeId', v_employee.id,
+      'employeeNumber', v_employee.employee_number,
+      'employeeName', v_employee.full_name,
+      'locationName', v_location.name,
+      'distanceM', v_distance,
+      'status', 'outside_radius'
+    );
+  end if;
+
+  select time_in.*
+  into v_open_session
+  from public.attendance_logs time_in
+  where time_in.employee_id = v_employee.id
+    and time_in.event_type = 'time_in'
+    and not exists (
+      select 1
+      from public.attendance_logs time_out
+      where time_out.employee_id = time_in.employee_id
+        and time_out.event_type = 'time_out'
+        and time_out.scanned_at > time_in.scanned_at
+    )
+  order by time_in.scanned_at desc
+  limit 1;
+
+  if not found then
+    return jsonb_build_object(
+      'success', false,
+      'message', 'No active time-in session found. Please time in first.',
+      'employeeId', v_employee.id,
+      'employeeNumber', v_employee.employee_number,
+      'employeeName', v_employee.full_name,
+      'status', 'no_active_session'
+    );
+  end if;
+
+  insert into public.attendance_logs (
+    employee_id,
+    employee_name_snapshot,
+    event_type,
+    scanned_at,
+    local_date,
+    local_time,
+    latitude,
+    longitude,
+    accuracy_m,
+    location_id,
+    location_name_snapshot,
+    distance_m,
+    status,
+    minutes_late,
+    payroll_deduction,
+    selfie_path,
+    source_label
+  )
+  values (
+    v_employee.id,
+    v_employee.full_name,
+    'time_out',
+    v_scanned_at,
+    v_local_date,
+    v_local_time,
+    p_latitude,
+    p_longitude,
+    p_accuracy,
+    v_location.id,
+    v_location.name,
+    v_distance,
+    'allowed',
+    0,
+    0,
+    p_selfie_path,
+    p_source_label
+  )
+  returning * into v_attendance;
+
+  return jsonb_build_object(
+    'success', true,
+    'message', 'Time out recorded successfully.',
+    'employeeId', v_employee.id,
+    'employeeNumber', v_employee.employee_number,
+    'employeeName', v_employee.full_name,
+    'eventType', 'time_out',
+    'locationName', v_location.name,
+    'distanceM', v_distance,
+    'scannedAt', v_attendance.scanned_at,
+    'status', 'allowed'
+  );
+end;
+$$;
+
 create or replace function public.admin_create_employee(
   p_full_name text,
   p_role_name text,
@@ -1079,6 +1269,8 @@ end;
 $$;
 
 grant execute on function public.record_attendance_scan(text, text, double precision, double precision, double precision, text, text) to anon, authenticated;
+grant execute on function public.list_open_attendance_sessions() to anon, authenticated;
+grant execute on function public.record_attendance_time_out_by_employee(uuid, double precision, double precision, double precision, text, text) to anon, authenticated;
 grant execute on function public.admin_create_employee(text, text, numeric, uuid, date, text[]) to authenticated;
 grant execute on function public.staff_dashboard(text) to anon, authenticated;
 grant execute on function public.pos_checkout(text, jsonb, text, numeric, text, text) to anon, authenticated;
