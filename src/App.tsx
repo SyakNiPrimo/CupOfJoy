@@ -231,13 +231,15 @@ export default function App() {
 
         {showHeaderNav ? (
           <div className="tab-row wrap">
-            <button
-              className={tab === 'attendance' ? 'tab-btn active' : 'tab-btn'}
-              onClick={() => setTab('attendance')}
-              type="button"
-            >
-              Staff Time In / Out
-            </button>
+            {activeRole === 'staff' ? (
+              <button
+                className={tab === 'attendance' ? 'tab-btn active' : 'tab-btn'}
+                onClick={() => setTab('attendance')}
+                type="button"
+              >
+                Staff Time In / Out
+              </button>
+            ) : null}
 
             {activeRole === 'admin' ? (
               <button
