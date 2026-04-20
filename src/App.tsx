@@ -352,7 +352,7 @@ export default function App() {
       ) : null}
 
       {tab === 'attendance' ? (
-        <AttendancePanel onGoToPOS={() => setTab('pos')} />
+        <AttendancePanel onBack={() => setTab('home')} onGoToPOS={() => setTab('pos')} />
       ) : null}
 
       {activeRole === 'admin' && tab === 'dashboard' ? <DashboardPanel forcedMode="admin" /> : null}

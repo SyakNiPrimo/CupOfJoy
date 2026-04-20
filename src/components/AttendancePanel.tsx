@@ -10,6 +10,7 @@ QrScanner.WORKER_PATH = qrWorker;
 
 type AttendancePanelProps = {
   onGoToPOS?: () => void;
+  onBack?: () => void;
 };
 
 type LastStaffIdentity = {
@@ -19,7 +20,7 @@ type LastStaffIdentity = {
   qrToken?: string;
 };
 
-export default function AttendancePanel({ onGoToPOS }: AttendancePanelProps) {
+export default function AttendancePanel({ onGoToPOS, onBack }: AttendancePanelProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const scannerRef = useRef<QrScanner | null>(null);
 
@@ -290,6 +291,12 @@ export default function AttendancePanel({ onGoToPOS }: AttendancePanelProps) {
   return (
     <div className={showSelfiePanel ? 'grid-two' : 'single-panel'}>
       <div className="panel">
+        {onBack ? (
+          <button className="ghost-btn" onClick={onBack} type="button" disabled={busy}>
+            Back
+          </button>
+        ) : null}
+
         <div className="section-title">Login and Logout</div>
         <p className="muted">
           Time In and Time Out both use QR, location, and selfie so each record belongs to the right staff.
