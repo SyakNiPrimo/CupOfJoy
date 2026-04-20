@@ -143,7 +143,11 @@ function readLastStaff(): StaffIdentity | null {
   }
 }
 
-export default function DashboardPanel() {
+type DashboardPanelProps = {
+  forcedMode?: 'staff' | 'admin';
+};
+
+export default function DashboardPanel({ forcedMode }: DashboardPanelProps) {
   const [mode, setMode] = useState<'staff' | 'admin'>('staff');
 
   const [staffIdentity, setStaffIdentity] = useState<StaffIdentity | null>(null);
@@ -165,6 +169,12 @@ export default function DashboardPanel() {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (forcedMode) {
+      setMode(forcedMode);
+    }
+  }, [forcedMode]);
 
   useEffect(() => {
     const syncStaff = () => {
@@ -446,22 +456,24 @@ export default function DashboardPanel() {
           <div className="section-title">Dashboard</div>
           <p className="muted">Cutoff based summary for staff and owner view.</p>
 
-          <div className="toggle-row">
-            <button
-              className={mode === 'staff' ? 'toggle-btn active' : 'toggle-btn'}
-              type="button"
-              onClick={() => setMode('staff')}
-            >
-              Staff
-            </button>
-            <button
-              className={mode === 'admin' ? 'toggle-btn active' : 'toggle-btn'}
-              type="button"
-              onClick={() => setMode('admin')}
-            >
-              Admin
-            </button>
-          </div>
+          {!forcedMode ? (
+            <div className="toggle-row">
+              <button
+                className={mode === 'staff' ? 'toggle-btn active' : 'toggle-btn'}
+                type="button"
+                onClick={() => setMode('staff')}
+              >
+                Staff
+              </button>
+              <button
+                className={mode === 'admin' ? 'toggle-btn active' : 'toggle-btn'}
+                type="button"
+                onClick={() => setMode('admin')}
+              >
+                Admin
+              </button>
+            </div>
+          ) : null}
 
           {loading || ownerLoading ? <div className="info-box">Loading dashboard...</div> : null}
           {error ? <div className="error-box">{error}</div> : null}
