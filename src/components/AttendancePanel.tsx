@@ -285,8 +285,10 @@ export default function AttendancePanel({ onGoToPOS }: AttendancePanelProps) {
           ? 'Scan QR, then capture a selfie to confirm the exact staff logging out.'
           : 'Choose Time In, scan QR, then allow location before selfie capture.';
 
+  const showSelfiePanel = Boolean(qrToken && coords);
+
   return (
-    <div className="grid-two">
+    <div className={showSelfiePanel ? 'grid-two' : 'single-panel'}>
       <div className="panel">
         <div className="section-title">Login and Logout</div>
         <p className="muted">
@@ -399,7 +401,9 @@ export default function AttendancePanel({ onGoToPOS }: AttendancePanelProps) {
         ) : null}
       </div>
 
-      <SelfieCapture enabled={selfieEnabled} helpText={selfieHelpText} onCaptured={setSelfieDataUrl} />
+      {showSelfiePanel ? (
+        <SelfieCapture enabled={selfieEnabled} helpText={selfieHelpText} onCaptured={setSelfieDataUrl} />
+      ) : null}
     </div>
   );
 }

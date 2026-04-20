@@ -50,6 +50,12 @@ button {
   gap: 20px;
 }
 
+.single-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 560px);
+  justify-content: center;
+}
+
 .panel {
   background: #ffffff;
   border-radius: 20px;
