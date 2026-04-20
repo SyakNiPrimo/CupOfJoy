@@ -19,23 +19,6 @@ type LastStaffIdentity = {
   qrToken?: string;
 };
 
-type OpenAttendanceSession = {
-  employeeId: string;
-  employeeNumber: string;
-  employeeName: string;
-  timeInAt: string;
-};
-
-function readLastStaff(): LastStaffIdentity | null {
-  try {
-    const raw = localStorage.getItem('coj_last_staff');
-    if (!raw) return null;
-    return JSON.parse(raw) as LastStaffIdentity;
-  } catch {
-    return null;
-  }
-}
-
 export default function AttendancePanel({ onGoToPOS }: AttendancePanelProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const scannerRef = useRef<QrScanner | null>(null);
@@ -44,14 +27,11 @@ export default function AttendancePanel({ onGoToPOS }: AttendancePanelProps) {
   const [scannerActive, setScannerActive] = useState(false);
 
   const [qrToken, setQrToken] = useState('');
-  const [selectedEmployeeId, setSelectedEmployeeId] = useState('');
-  const [openSessions, setOpenSessions] = useState<OpenAttendanceSession[]>([]);
   const [coords, setCoords] = useState<Coordinates | null>(null);
   const [selfieDataUrl, setSelfieDataUrl] = useState('');
 
   const [busy, setBusy] = useState(false);
   const [locationBusy, setLocationBusy] = useState(false);
-  const [sessionBusy, setSessionBusy] = useState(false);
   const [autoSubmitted, setAutoSubmitted] = useState(false);
   const [submitStep, setSubmitStep] = useState('');
 
@@ -100,15 +80,13 @@ export default function AttendancePanel({ onGoToPOS }: AttendancePanelProps) {
   }, [scannerActive]);
 
   useEffect(() => {
-    const hasSubmitIdentity = eventType === 'time_out' ? Boolean(qrToken || selectedEmployeeId) : Boolean(qrToken);
-
-    if (!eventType || !hasSubmitIdentity || !coords || !selfieDataUrl || busy || autoSubmitted) {
+    if (!eventType || !qrToken || !coords || !selfieDataUrl || busy || autoSubmitted) {
       return;
     }
 
     setAutoSubmitted(true);
     void submitAttendance();
-  }, [eventType, qrToken, selectedEmployeeId, coords, selfieDataUrl, busy, autoSubmitted]);
+  }, [eventType, qrToken, coords, selfieDataUrl, busy, autoSubmitted]);
 
   async function autoRequestLocation() {
     try {
@@ -125,13 +103,9 @@ export default function AttendancePanel({ onGoToPOS }: AttendancePanelProps) {
   }
 
   async function startFlow(type: AttendanceEventType) {
-    const rememberedStaff = readLastStaff();
-
     setEventType(type);
-    setScannerActive(type === 'time_in');
+    setScannerActive(true);
     setQrToken('');
-    setSelectedEmployeeId('');
-    setOpenSessions([]);
     setCoords(null);
     setSelfieDataUrl('');
     setStatus(null);
@@ -140,25 +114,10 @@ export default function AttendancePanel({ onGoToPOS }: AttendancePanelProps) {
     setLocationBusy(false);
     setAutoSubmitted(false);
     setSubmitStep('');
-
-    if (type === 'time_out') {
-      if (!rememberedStaff?.qrToken) {
-        await loadOpenSessionsForTimeOut();
-        return;
-      }
-
-      setQrToken(rememberedStaff.qrToken);
-      if (rememberedStaff.employeeId) {
-        setSelectedEmployeeId(rememberedStaff.employeeId);
-      }
-      await autoRequestLocation();
-    }
   }
 
   async function restartFlow() {
     setQrToken('');
-    setSelectedEmployeeId('');
-    setOpenSessions([]);
     setCoords(null);
     setSelfieDataUrl('');
     setStatus(null);
@@ -168,74 +127,10 @@ export default function AttendancePanel({ onGoToPOS }: AttendancePanelProps) {
     setAutoSubmitted(false);
     setSubmitStep('');
 
-    if (eventType === 'time_in') {
+    if (eventType) {
       setScannerActive(true);
       return;
     }
-
-    if (eventType === 'time_out') {
-      const rememberedStaff = readLastStaff();
-      if (!rememberedStaff?.qrToken) {
-        await loadOpenSessionsForTimeOut();
-        return;
-      }
-
-      setQrToken(rememberedStaff.qrToken);
-      if (rememberedStaff.employeeId) {
-        setSelectedEmployeeId(rememberedStaff.employeeId);
-      }
-      await autoRequestLocation();
-    }
-  }
-
-  async function loadOpenSessionsForTimeOut() {
-    try {
-      setSessionBusy(true);
-      setError('');
-      setOpenSessions([]);
-      setSelectedEmployeeId('');
-
-      const { data, error: rpcError } = await withTimeout(
-        supabase.rpc('list_open_attendance_sessions'),
-        30000,
-        'Loading active sessions timed out. Make sure the updated SQL setup was run in Supabase.',
-      );
-
-      if (rpcError) throw rpcError;
-
-      const result = data as { success?: boolean; sessions?: OpenAttendanceSession[]; message?: string };
-
-      if (!result.success) {
-        throw new Error(result.message || 'Unable to load active staff sessions.');
-      }
-
-      const sessions = result.sessions ?? [];
-      setOpenSessions(sessions);
-
-      if (sessions.length === 0) {
-        setError('No active staff session found. Please time in first.');
-        return;
-      }
-
-      if (sessions.length === 1) {
-        setSelectedEmployeeId(sessions[0].employeeId);
-        await autoRequestLocation();
-      }
-    } catch (sessionError) {
-      const message = sessionError instanceof Error ? sessionError.message : 'Unable to load active staff sessions.';
-      setError(message);
-    } finally {
-      setSessionBusy(false);
-    }
-  }
-
-  async function chooseOpenSession(employeeId: string) {
-    setSelectedEmployeeId(employeeId);
-    setSelfieDataUrl('');
-    setStatus(null);
-    setError('');
-    setAutoSubmitted(false);
-    await autoRequestLocation();
   }
 
   async function submitAttendance() {
@@ -244,13 +139,8 @@ export default function AttendancePanel({ onGoToPOS }: AttendancePanelProps) {
       return;
     }
 
-    if (eventType === 'time_in' && !qrToken) {
+    if (!qrToken) {
       setError('Please scan the employee QR code first.');
-      return;
-    }
-
-    if (eventType === 'time_out' && !qrToken && !selectedEmployeeId) {
-      setError('Choose the active staff session to time out.');
       return;
     }
 
@@ -278,28 +168,16 @@ export default function AttendancePanel({ onGoToPOS }: AttendancePanelProps) {
 
       setSubmitStep('Saving attendance record...');
 
-      const request =
-        eventType === 'time_out' && !qrToken
-          ? supabase.rpc('record_attendance_time_out_by_employee', {
-              p_employee_id: selectedEmployeeId,
-              p_latitude: coords.latitude,
-              p_longitude: coords.longitude,
-              p_accuracy: coords.accuracy ?? null,
-              p_selfie_path: selfiePath,
-              p_source_label: 'netlify-kiosk',
-            })
-          : supabase.rpc('record_attendance_scan', {
-              p_qr_token: qrToken,
-              p_event_type: eventType,
-              p_latitude: coords.latitude,
-              p_longitude: coords.longitude,
-              p_accuracy: coords.accuracy ?? null,
-              p_selfie_path: selfiePath,
-              p_source_label: 'netlify-kiosk',
-            });
-
       const { data, error: rpcError } = await withTimeout(
-        request,
+        supabase.rpc('record_attendance_scan', {
+          p_qr_token: qrToken,
+          p_event_type: eventType,
+          p_latitude: coords.latitude,
+          p_longitude: coords.longitude,
+          p_accuracy: coords.accuracy ?? null,
+          p_selfie_path: selfiePath,
+          p_source_label: 'netlify-kiosk',
+        }),
         30000,
         'Saving attendance timed out. Make sure the updated SQL setup was run in Supabase.',
       );
@@ -383,14 +261,11 @@ export default function AttendancePanel({ onGoToPOS }: AttendancePanelProps) {
     });
   }
 
-  const hasSubmitIdentity = eventType === 'time_out' ? Boolean(qrToken || selectedEmployeeId) : Boolean(qrToken);
-  const selfieEnabled = Boolean(eventType && hasSubmitIdentity && coords && !busy && !status);
+  const selfieEnabled = Boolean(eventType && qrToken && coords && !busy && !status);
   const stepLabel = !eventType
     ? 'Choose Time In or Time Out.'
-    : eventType === 'time_in' && !qrToken
+    : !qrToken
       ? 'Scan employee QR.'
-      : eventType === 'time_out' && !hasSubmitIdentity
-        ? 'Choose active staff session.'
       : !coords
         ? 'Checking location.'
         : !selfieDataUrl
@@ -407,7 +282,7 @@ export default function AttendancePanel({ onGoToPOS }: AttendancePanelProps) {
       : selfieEnabled
         ? 'Take a clear selfie before submitting your time record.'
         : eventType === 'time_out'
-          ? 'Time Out uses the selected active staff session. Capture a selfie when ready.'
+          ? 'Scan QR, then capture a selfie to confirm the exact staff logging out.'
           : 'Choose Time In, scan QR, then allow location before selfie capture.';
 
   return (
@@ -415,7 +290,7 @@ export default function AttendancePanel({ onGoToPOS }: AttendancePanelProps) {
       <div className="panel">
         <div className="section-title">Login and Logout</div>
         <p className="muted">
-          Time In uses QR, location, and selfie. Time Out uses selfie and the active staff session on this device.
+          Time In and Time Out both use QR, location, and selfie so each record belongs to the right staff.
         </p>
 
         <div className="toggle-row">
@@ -441,8 +316,6 @@ export default function AttendancePanel({ onGoToPOS }: AttendancePanelProps) {
 
         {!eventType ? (
           <div className="info-box">Choose Time In or Time Out to start.</div>
-        ) : eventType === 'time_out' && hasSubmitIdentity ? (
-          <div className="success-box">Active staff session found. No QR scan needed for Time Out.</div>
         ) : !qrToken ? (
           <>
             <video ref={videoRef} className="scanner-preview" playsInline muted />
@@ -451,27 +324,6 @@ export default function AttendancePanel({ onGoToPOS }: AttendancePanelProps) {
         ) : (
           <div className="success-box">QR scanned successfully.</div>
         )}
-
-        {sessionBusy ? <div className="info-box">Loading active staff sessions...</div> : null}
-
-        {eventType === 'time_out' && !hasSubmitIdentity && openSessions.length > 1 ? (
-          <div className="info-box">
-            <div style={{ marginBottom: '8px' }}>Choose who is timing out:</div>
-            <div className="action-row wrap">
-              {openSessions.map((session) => (
-                <button
-                  className="secondary-btn"
-                  key={session.employeeId}
-                  onClick={() => void chooseOpenSession(session.employeeId)}
-                  type="button"
-                  disabled={busy || sessionBusy}
-                >
-                  {session.employeeNumber} - {session.employeeName}
-                </button>
-              ))}
-            </div>
-          </div>
-        ) : null}
 
         {locationBusy ? <div className="info-box">Checking location automatically...</div> : null}
         {coords ? <div className="info-box">Location checked successfully.</div> : null}
