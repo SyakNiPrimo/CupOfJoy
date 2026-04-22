@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
 
 type AttendanceSessionRow = {
@@ -23,12 +23,18 @@ type AttendanceCorrectionRow = {
   employee_number: string | null;
   employee_name: string;
   event_type: 'time_in' | 'time_out';
-  correction_type: 'edit_log' | 'manual_time_out';
+  correction_type: 'edit_log' | 'manual_time_out' | 'manual_session';
   old_scanned_at: string | null;
   new_scanned_at: string | null;
   reason: string;
   corrected_by_name: string | null;
   corrected_at: string;
+};
+
+type EmployeeOption = {
+  id: string;
+  employee_number: string | null;
+  full_name: string;
 };
 
 type EditorState =
@@ -86,19 +92,44 @@ function toRpcTimestamp(value: string) {
   return `${value}:00+08:00`;
 }
 
+const emptyManualEntry = {
+  employeeId: '',
+  timeInAt: '',
+  timeOutAt: '',
+  reason: '',
+};
+
 export default function AdminAttendancePanel() {
   const [sessions, setSessions] = useState<AttendanceSessionRow[]>([]);
   const [corrections, setCorrections] = useState<AttendanceCorrectionRow[]>([]);
+  const [employees, setEmployees] = useState<EmployeeOption[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [editor, setEditor] = useState<EditorState>(null);
   const [reason, setReason] = useState('');
+  const [manualEntry, setManualEntry] = useState(emptyManualEntry);
 
   useEffect(() => {
-    void loadAttendance();
+    void Promise.all([loadAttendance(), loadEmployees()]);
   }, []);
+
+  async function loadEmployees() {
+    try {
+      const { data, error: queryError } = await supabase
+        .from('employees')
+        .select('id, employee_number, full_name')
+        .eq('is_active', true)
+        .order('employee_number', { ascending: true, nullsFirst: false });
+
+      if (queryError) throw queryError;
+      setEmployees((data ?? []) as EmployeeOption[]);
+    } catch (loadError) {
+      const message = loadError instanceof Error ? loadError.message : 'Unable to load employees for manual attendance.';
+      setError(message);
+    }
+  }
 
   async function loadAttendance() {
     try {
@@ -174,7 +205,50 @@ export default function AdminAttendancePanel() {
     }
   }
 
+  async function saveManualAttendance() {
+    try {
+      setSaving(true);
+      setError('');
+      setSuccess('');
+
+      if (!manualEntry.employeeId) {
+        throw new Error('Choose the employee first.');
+      }
+
+      if (!manualEntry.timeInAt) {
+        throw new Error('Enter the manual time in first.');
+      }
+
+      if (manualEntry.reason.trim().length < 5) {
+        throw new Error('Please enter a clear reason for the manual attendance entry.');
+      }
+
+      const { data, error: rpcError } = await supabase.rpc('owner_create_manual_attendance_session', {
+        p_employee_id: manualEntry.employeeId,
+        p_time_in_at: toRpcTimestamp(manualEntry.timeInAt),
+        p_time_out_at: manualEntry.timeOutAt ? toRpcTimestamp(manualEntry.timeOutAt) : null,
+        p_reason: manualEntry.reason.trim(),
+      });
+
+      if (rpcError) throw rpcError;
+      if (!data?.success) throw new Error(data?.message || 'Unable to create manual attendance.');
+
+      setSuccess(data.message || 'Manual attendance recorded successfully.');
+      setManualEntry(emptyManualEntry);
+      await loadAttendance();
+    } catch (saveError) {
+      const message = saveError instanceof Error ? saveError.message : 'Unable to create manual attendance.';
+      setError(message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const openSessions = sessions.filter((session) => session.session_status === 'open');
+  const selectedEmployee = useMemo(
+    () => employees.find((employee) => employee.id === manualEntry.employeeId) ?? null,
+    [employees, manualEntry.employeeId],
+  );
 
   return (
     <div className="panel">
@@ -197,6 +271,84 @@ export default function AdminAttendancePanel() {
         <div className="metric-card">
           <div className="metric-label">Audit Entries</div>
           <div className="metric-value">{corrections.length}</div>
+        </div>
+      </div>
+
+      <div className="contract-sheet">
+        <div className="section-title">Add Attendance for Employee</div>
+        <p className="muted">
+          Use this when a new employee already worked a shift and you need to encode the attendance manually from the
+          owner side.
+        </p>
+
+        <div
+          style={{
+            display: 'grid',
+            gap: '12px',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+            marginTop: '12px',
+          }}
+        >
+          <label className="inline-stack">
+            <span>Employee</span>
+            <select
+              value={manualEntry.employeeId}
+              onChange={(event) => setManualEntry((current) => ({ ...current, employeeId: event.target.value }))}
+            >
+              <option value="">Select employee</option>
+              {employees.map((employee) => (
+                <option key={employee.id} value={employee.id}>
+                  {employee.employee_number ? `${employee.employee_number} - ` : ''}
+                  {employee.full_name}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="inline-stack">
+            <span>Manual time in</span>
+            <input
+              type="datetime-local"
+              value={manualEntry.timeInAt}
+              onChange={(event) => setManualEntry((current) => ({ ...current, timeInAt: event.target.value }))}
+            />
+          </label>
+
+          <label className="inline-stack">
+            <span>Manual time out (optional)</span>
+            <input
+              type="datetime-local"
+              value={manualEntry.timeOutAt}
+              onChange={(event) => setManualEntry((current) => ({ ...current, timeOutAt: event.target.value }))}
+            />
+          </label>
+        </div>
+
+        <label className="inline-stack" style={{ marginTop: '12px' }}>
+          <span>Reason</span>
+          <input
+            type="text"
+            value={manualEntry.reason}
+            onChange={(event) => setManualEntry((current) => ({ ...current, reason: event.target.value }))}
+            placeholder="Example: First day training shift was completed before QR label was printed."
+          />
+        </label>
+
+        {selectedEmployee ? (
+          <div className="info-box" style={{ marginTop: '12px' }}>
+            Adding attendance for {selectedEmployee.full_name}
+            {selectedEmployee.employee_number ? ` (${selectedEmployee.employee_number})` : ''}.
+            {manualEntry.timeOutAt ? ' Both time in and time out will be saved.' : ' Only time in will be created for now.'}
+          </div>
+        ) : null}
+
+        <div className="action-row wrap" style={{ marginTop: '12px' }}>
+          <button className="secondary-btn" type="button" onClick={() => void saveManualAttendance()} disabled={saving}>
+            {saving ? 'Saving...' : 'Add Attendance'}
+          </button>
+          <button className="ghost-btn" type="button" onClick={() => setManualEntry(emptyManualEntry)} disabled={saving}>
+            Clear
+          </button>
         </div>
       </div>
 
@@ -368,7 +520,11 @@ export default function AdminAttendancePanel() {
                       <span className="muted small">{correction.employee_number || '-'}</span>
                     </td>
                     <td>
-                      {correction.correction_type === 'manual_time_out' ? 'Manual Time Out' : 'Edited Log'}
+                      {correction.correction_type === 'manual_time_out'
+                        ? 'Manual Time Out'
+                        : correction.correction_type === 'manual_session'
+                          ? 'Manual Session'
+                          : 'Edited Log'}
                       <br />
                       <span className="muted small">{correction.event_type}</span>
                     </td>

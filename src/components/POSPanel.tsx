@@ -25,6 +25,12 @@ type LastStaffIdentity = {
   qrToken?: string;
 };
 
+type POSPanelProps = {
+  allowManagementCheckout?: boolean;
+  managementName?: string | null;
+  managementRole?: string | null;
+};
+
 const menuItems: MenuItem[] = [
   { id: 'coffee-americano', name: 'Americano', price: 90, category: 'Coffee' },
   { id: 'coffee-latte', name: 'Latte', price: 95, category: 'Coffee' },
@@ -164,7 +170,11 @@ function readLastStaff(): LastStaffIdentity | null {
   }
 }
 
-export default function POSPanel() {
+export default function POSPanel({
+  allowManagementCheckout = false,
+  managementName = null,
+  managementRole = null,
+}: POSPanelProps) {
   const [selectedCategory, setSelectedCategory] = useState('Coffee');
   const [cart, setCart] = useState<CartItem[]>([]);
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
@@ -308,7 +318,7 @@ export default function POSPanel() {
       return;
     }
 
-    if (!lastStaff?.qrToken) {
+    if (!allowManagementCheckout && !lastStaff?.qrToken) {
       alert('No active staff session found. Please time in first.');
       return;
     }
@@ -335,7 +345,7 @@ export default function POSPanel() {
       setCheckoutError('');
       setCheckoutBusy(true);
 
-      if (!lastStaff?.qrToken) {
+      if (!allowManagementCheckout && !lastStaff?.qrToken) {
         throw new Error('No active staff session found. Please time in first.');
       }
 
@@ -357,7 +367,7 @@ export default function POSPanel() {
         paymentMethod === 'cash' ? null : await uploadPaymentProof(paymentProofDataUrl, paymentProofName);
 
       const { data: result, error: rpcError } = await supabase.rpc('pos_checkout', {
-        p_qr_token: lastStaff.qrToken,
+        p_qr_token: allowManagementCheckout ? null : lastStaff?.qrToken ?? null,
         p_items: cart,
         p_payment_method: paymentMethod,
         p_cash_received: paymentMethod === 'cash' ? cashReceivedNumber : null,
@@ -412,7 +422,13 @@ export default function POSPanel() {
           <div className="section-title">Point of Sale</div>
           <p className="muted">Real Cup of Joy menu is now mapped in the POS starter.</p>
 
-          {lastStaff?.employeeName ? (
+          {allowManagementCheckout ? (
+            <div className="info-box">
+              Operator: <strong>{managementName || 'Cup of Joy Management'}</strong>
+              <br />
+              Role: {(managementRole || 'admin').toUpperCase()}
+            </div>
+          ) : lastStaff?.employeeName ? (
             <div className="info-box">
               Cashier: <strong>{lastStaff.employeeName}</strong>
               <br />

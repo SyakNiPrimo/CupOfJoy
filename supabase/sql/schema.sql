@@ -105,7 +105,7 @@ create table if not exists public.attendance_log_corrections (
   attendance_log_id uuid not null references public.attendance_logs(id) on delete cascade,
   employee_id uuid not null references public.employees(id) on delete cascade,
   event_type text not null check (event_type in ('time_in', 'time_out')),
-  correction_type text not null check (correction_type in ('edit_log', 'manual_time_out')),
+  correction_type text not null check (correction_type in ('edit_log', 'manual_time_out', 'manual_session')),
   old_scanned_at timestamptz,
   new_scanned_at timestamptz,
   old_local_date date,
@@ -120,6 +120,11 @@ create table if not exists public.attendance_log_corrections (
   corrected_by uuid,
   created_at timestamptz not null default now()
 );
+
+alter table public.attendance_log_corrections drop constraint if exists attendance_log_corrections_correction_type_check;
+alter table public.attendance_log_corrections
+add constraint attendance_log_corrections_correction_type_check
+check (correction_type in ('edit_log', 'manual_time_out', 'manual_session'));
 
 create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
@@ -2465,6 +2470,278 @@ begin
 end;
 $$;
 
+create or replace function public.owner_create_manual_attendance_session(
+  p_employee_id uuid,
+  p_time_in_at timestamptz,
+  p_time_out_at timestamptz default null,
+  p_reason text default 'Manual attendance entry by owner/admin'
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  v_employee public.employees;
+  v_location public.business_locations;
+  v_shift record;
+  v_time_in public.attendance_logs;
+  v_time_out public.attendance_logs;
+  v_work_date date;
+  v_work_day_key text;
+  v_late_minutes integer := 0;
+  v_payroll_deduction numeric(10,2) := 0;
+begin
+  if not public.is_owner() then
+    return jsonb_build_object('success', false, 'message', 'Owner login required.');
+  end if;
+
+  if p_employee_id is null or p_time_in_at is null then
+    return jsonb_build_object('success', false, 'message', 'Employee and manual time in are required.');
+  end if;
+
+  if coalesce(length(trim(p_reason)), 0) < 5 then
+    return jsonb_build_object('success', false, 'message', 'Please provide a clear reason for the manual attendance entry.');
+  end if;
+
+  if p_time_out_at is not null and p_time_out_at <= p_time_in_at then
+    return jsonb_build_object('success', false, 'message', 'Time out must be later than time in.');
+  end if;
+
+  select *
+  into v_employee
+  from public.employees
+  where id = p_employee_id
+    and is_active = true;
+
+  if not found then
+    return jsonb_build_object('success', false, 'message', 'Active employee not found.');
+  end if;
+
+  v_work_date := (p_time_in_at at time zone 'Asia/Manila')::date;
+  v_work_day_key := lower(trim(to_char(v_work_date, 'dy')));
+
+  if exists (
+    select 1
+    from public.attendance_logs time_in
+    where time_in.employee_id = v_employee.id
+      and time_in.event_type = 'time_in'
+      and time_in.local_date = v_work_date
+      and not exists (
+        select 1
+        from public.attendance_logs time_out
+        where time_out.employee_id = time_in.employee_id
+          and time_out.event_type = 'time_out'
+          and time_out.scanned_at > time_in.scanned_at
+      )
+  ) then
+    return jsonb_build_object('success', false, 'message', 'This employee already has an open attendance session for that work date.');
+  end if;
+
+  select *
+  into v_location
+  from public.business_locations
+  where is_active = true
+  order by created_at asc
+  limit 1;
+
+  if not found then
+    return jsonb_build_object('success', false, 'message', 'No active business location found for manual attendance.');
+  end if;
+
+  select s.shift_name, s.scheduled_start, s.paid_hours, s.grace_minutes, esa.work_days
+  into v_shift
+  from public.employee_shift_assignments esa
+  join public.shifts s on s.id = esa.shift_id
+  where esa.employee_id = v_employee.id
+    and esa.effective_from <= v_work_date
+    and (esa.effective_to is null or esa.effective_to >= v_work_date)
+  order by esa.effective_from desc
+  limit 1;
+
+  if found and v_work_day_key = any(v_shift.work_days) then
+    v_late_minutes := greatest(
+      0,
+      floor(
+        extract(
+          epoch from (
+            ((p_time_in_at at time zone 'Asia/Manila')::time)
+            - (v_shift.scheduled_start + make_interval(mins => v_shift.grace_minutes))
+          )
+        ) / 60
+      )::integer
+    );
+
+    if v_late_minutes > 0 and coalesce(v_employee.base_daily_rate, 0) > 0 and coalesce(v_shift.paid_hours, 0) > 0 then
+      v_payroll_deduction := round((v_employee.base_daily_rate / (v_shift.paid_hours * 60)) * v_late_minutes, 2);
+    end if;
+  end if;
+
+  insert into public.attendance_logs (
+    employee_id,
+    employee_name_snapshot,
+    event_type,
+    scanned_at,
+    local_date,
+    local_time,
+    latitude,
+    longitude,
+    accuracy_m,
+    location_id,
+    location_name_snapshot,
+    distance_m,
+    status,
+    minutes_late,
+    payroll_deduction,
+    selfie_path,
+    source_label
+  )
+  values (
+    v_employee.id,
+    v_employee.full_name,
+    'time_in',
+    p_time_in_at,
+    (p_time_in_at at time zone 'Asia/Manila')::date,
+    (p_time_in_at at time zone 'Asia/Manila')::time,
+    v_location.latitude,
+    v_location.longitude,
+    0,
+    v_location.id,
+    v_location.name,
+    0,
+    'allowed',
+    v_late_minutes,
+    v_payroll_deduction,
+    'manual-owner-adjustment',
+    'owner-attendance-correction'
+  )
+  returning * into v_time_in;
+
+  insert into public.attendance_log_corrections (
+    attendance_log_id,
+    employee_id,
+    event_type,
+    correction_type,
+    old_scanned_at,
+    new_scanned_at,
+    old_local_date,
+    new_local_date,
+    old_local_time,
+    new_local_time,
+    old_minutes_late,
+    new_minutes_late,
+    old_payroll_deduction,
+    new_payroll_deduction,
+    reason,
+    corrected_by
+  )
+  values (
+    v_time_in.id,
+    v_employee.id,
+    'time_in',
+    'manual_session',
+    null,
+    v_time_in.scanned_at,
+    null,
+    v_time_in.local_date,
+    null,
+    v_time_in.local_time,
+    null,
+    v_time_in.minutes_late,
+    null,
+    v_time_in.payroll_deduction,
+    trim(p_reason),
+    auth.uid()
+  );
+
+  if p_time_out_at is not null then
+    insert into public.attendance_logs (
+      employee_id,
+      employee_name_snapshot,
+      event_type,
+      scanned_at,
+      local_date,
+      local_time,
+      latitude,
+      longitude,
+      accuracy_m,
+      location_id,
+      location_name_snapshot,
+      distance_m,
+      status,
+      minutes_late,
+      payroll_deduction,
+      selfie_path,
+      source_label
+    )
+    values (
+      v_employee.id,
+      v_employee.full_name,
+      'time_out',
+      p_time_out_at,
+      (p_time_out_at at time zone 'Asia/Manila')::date,
+      (p_time_out_at at time zone 'Asia/Manila')::time,
+      v_location.latitude,
+      v_location.longitude,
+      0,
+      v_location.id,
+      v_location.name,
+      0,
+      'allowed',
+      0,
+      0,
+      'manual-owner-adjustment',
+      'owner-attendance-correction'
+    )
+    returning * into v_time_out;
+
+    insert into public.attendance_log_corrections (
+      attendance_log_id,
+      employee_id,
+      event_type,
+      correction_type,
+      old_scanned_at,
+      new_scanned_at,
+      old_local_date,
+      new_local_date,
+      old_local_time,
+      new_local_time,
+      old_minutes_late,
+      new_minutes_late,
+      old_payroll_deduction,
+      new_payroll_deduction,
+      reason,
+      corrected_by
+    )
+    values (
+      v_time_out.id,
+      v_employee.id,
+      'time_out',
+      'manual_session',
+      null,
+      v_time_out.scanned_at,
+      null,
+      v_time_out.local_date,
+      null,
+      v_time_out.local_time,
+      null,
+      0,
+      null,
+      0,
+      trim(p_reason),
+      auth.uid()
+    );
+  end if;
+
+  return jsonb_build_object(
+    'success', true,
+    'message', case when p_time_out_at is null then 'Manual time in recorded successfully.' else 'Manual attendance session recorded successfully.' end,
+    'timeInLog', row_to_json(v_time_in),
+    'timeOutLog', case when v_time_out.id is null then null else row_to_json(v_time_out) end
+  );
+end;
+$$;
+
 create or replace function public.owner_set_employee_contract_signed(
   p_employee_id uuid,
   p_signed boolean
@@ -4205,6 +4482,7 @@ set search_path = public, extensions
 as $$
 declare
   v_employee public.employees;
+  v_profile public.profiles;
   v_item record;
   v_total numeric(10,2) := 0;
   v_transaction_number text;
@@ -4223,34 +4501,46 @@ begin
     return jsonb_build_object('success', false, 'message', 'Cart is empty.');
   end if;
 
-  select *
-  into v_employee
-  from public.employees
-  where qr_token_hash = encode(digest(p_qr_token, 'sha256'), 'hex')
-    and is_active = true;
+  if public.is_owner() and trim(coalesce(p_qr_token, '')) = '' then
+    select *
+    into v_profile
+    from public.profiles
+    where id = auth.uid()
+      and is_active = true;
 
-  if not found then
-    return jsonb_build_object('success', false, 'message', 'Employee QR code not recognized.');
-  end if;
+    if not found then
+      return jsonb_build_object('success', false, 'message', 'Active owner/admin profile not found.');
+    end if;
+  else
+    select *
+    into v_employee
+    from public.employees
+    where qr_token_hash = encode(digest(p_qr_token, 'sha256'), 'hex')
+      and is_active = true;
 
-  if v_employee.contract_status = 'pending_signature'
-    and v_employee.contract_due_at is not null
-    and v_employee.contract_due_at < now() then
-    update public.employees
-    set contract_status = 'expired'
-    where id = v_employee.id
-    returning * into v_employee;
-  end if;
+    if not found then
+      return jsonb_build_object('success', false, 'message', 'Employee QR code not recognized.');
+    end if;
 
-  if coalesce(v_employee.contract_status, 'not_sent') <> 'signed' then
-    return jsonb_build_object(
-      'success', false,
-      'message', 'Signed contract is required before this employee can use the POS.',
-      'employeeId', v_employee.id,
-      'employeeNumber', v_employee.employee_number,
-      'employeeName', v_employee.full_name,
-      'status', 'contract_not_signed'
-    );
+    if v_employee.contract_status = 'pending_signature'
+      and v_employee.contract_due_at is not null
+      and v_employee.contract_due_at < now() then
+      update public.employees
+      set contract_status = 'expired'
+      where id = v_employee.id
+      returning * into v_employee;
+    end if;
+
+    if coalesce(v_employee.contract_status, 'not_sent') <> 'signed' then
+      return jsonb_build_object(
+        'success', false,
+        'message', 'Signed contract is required before this employee can use the POS.',
+        'employeeId', v_employee.id,
+        'employeeNumber', v_employee.employee_number,
+        'employeeName', v_employee.full_name,
+        'status', 'contract_not_signed'
+      );
+    end if;
   end if;
 
   for v_item in
@@ -4274,30 +4564,32 @@ begin
     return jsonb_build_object('success', false, 'message', 'Payment proof is required for digital payments.');
   end if;
 
-  select time_in.*
-  into v_open_session
-  from public.attendance_logs time_in
-  where time_in.employee_id = v_employee.id
-    and time_in.event_type = 'time_in'
-    and not exists (
-      select 1
-      from public.attendance_logs time_out
-      where time_out.employee_id = time_in.employee_id
-        and time_out.event_type = 'time_out'
-        and time_out.scanned_at > time_in.scanned_at
-    )
-  order by time_in.scanned_at desc
-  limit 1;
+  if v_profile.id is null then
+    select time_in.*
+    into v_open_session
+    from public.attendance_logs time_in
+    where time_in.employee_id = v_employee.id
+      and time_in.event_type = 'time_in'
+      and not exists (
+        select 1
+        from public.attendance_logs time_out
+        where time_out.employee_id = time_in.employee_id
+          and time_out.event_type = 'time_out'
+          and time_out.scanned_at > time_in.scanned_at
+      )
+    order by time_in.scanned_at desc
+    limit 1;
 
-  if not found then
-    return jsonb_build_object(
-      'success', false,
-      'message', 'No active staff time-in session found. Please time in before using POS.',
-      'employeeId', v_employee.id,
-      'employeeNumber', v_employee.employee_number,
-      'employeeName', v_employee.full_name,
-      'status', 'no_active_session'
-    );
+    if not found then
+      return jsonb_build_object(
+        'success', false,
+        'message', 'No active staff time-in session found. Please time in before using POS.',
+        'employeeId', v_employee.id,
+        'employeeNumber', v_employee.employee_number,
+        'employeeName', v_employee.full_name,
+        'status', 'no_active_session'
+      );
+    end if;
   end if;
 
   v_transaction_number := public.next_transaction_number();
@@ -4322,8 +4614,8 @@ begin
   values (
     v_transaction_number,
     v_employee.id,
-    v_employee.employee_number,
-    v_employee.full_name,
+    coalesce(v_employee.employee_number, case when v_profile.id is not null then upper(coalesce(v_profile.role, 'admin')) end),
+    coalesce(v_employee.full_name, v_profile.full_name, v_profile.email, 'Cup of Joy Management'),
     v_open_session.id,
     v_open_session.scanned_at,
     p_payment_method,
@@ -4383,6 +4675,7 @@ grant execute on function public.owner_set_employee_active(uuid, boolean) to aut
 grant execute on function public.owner_attendance_dashboard() to authenticated;
 grant execute on function public.owner_update_attendance_log(uuid, timestamptz, text) to authenticated;
 grant execute on function public.owner_close_open_attendance_session(uuid, timestamptz, text) to authenticated;
+grant execute on function public.owner_create_manual_attendance_session(uuid, timestamptz, timestamptz, text) to authenticated;
 grant execute on function public.owner_set_employee_contract_signed(uuid, boolean) to authenticated;
 grant execute on function public.claim_staff_portal_access() to authenticated;
 grant execute on function public.claim_management_access() to authenticated;

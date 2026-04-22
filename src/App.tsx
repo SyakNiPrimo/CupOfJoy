@@ -674,7 +674,13 @@ export default function App() {
         <AccountPanel ownerProfile={managementProfile} onSignedOut={signOutCurrentUser} />
       ) : null}
 
-      {(activeRole === 'admin' || hasPosAccess) && tab === 'pos' ? <POSPanel /> : null}
+      {(activeRole === 'admin' || hasPosAccess) && tab === 'pos' ? (
+        <POSPanel
+          allowManagementCheckout={activeRole === 'admin'}
+          managementName={managementProfile?.full_name || managementProfile?.email || 'Cup of Joy Management'}
+          managementRole={managementProfile?.role || 'admin'}
+        />
+      ) : null}
 
       {activeRole === 'staff' && tab === 'staff-sales' ? <StaffSalesHistoryPanel qrToken={staffIdentity?.qrToken ?? null} /> : null}
       {activeRole === 'staff' && tab === 'staff-attendance' ? (
