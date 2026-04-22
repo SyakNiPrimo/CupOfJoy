@@ -11,6 +11,7 @@ QrScanner.WORKER_PATH = qrWorker;
 type AttendancePanelProps = {
   onGoToPOS?: () => void;
   onBack?: () => void;
+  onStaffLoggedOut?: () => void;
 };
 
 type LastStaffIdentity = {
@@ -20,7 +21,7 @@ type LastStaffIdentity = {
   qrToken?: string;
 };
 
-export default function AttendancePanel({ onGoToPOS, onBack }: AttendancePanelProps) {
+export default function AttendancePanel({ onGoToPOS, onBack, onStaffLoggedOut }: AttendancePanelProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const scannerRef = useRef<QrScanner | null>(null);
 
@@ -216,6 +217,10 @@ export default function AttendancePanel({ onGoToPOS, onBack }: AttendancePanelPr
       if (eventType === 'time_out') {
         localStorage.removeItem('coj_last_staff');
         window.dispatchEvent(new Event('coj-staff-updated'));
+
+        setTimeout(() => {
+          onStaffLoggedOut?.();
+        }, 900);
       }
 
       if (eventType === 'time_in' && onGoToPOS) {
